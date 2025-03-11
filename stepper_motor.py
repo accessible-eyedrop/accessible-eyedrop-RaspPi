@@ -1,4 +1,3 @@
-# stepper_motor.py
 import RPi.GPIO as GPIO
 import time
 
@@ -23,7 +22,10 @@ full_step_sequence = [
     [0, 0, 0, 1]
 ]
 
-def step_motor(steps, delay=0.002):
+# New default delay: 1.5x faster than 0.002 sec (~0.00133 sec)
+DEFAULT_DELAY = 0.002
+
+def step_motor(steps, delay=DEFAULT_DELAY):
     seq_len = len(full_step_sequence)
     for i in range(steps):
         current_step = full_step_sequence[i % seq_len]
@@ -32,20 +34,22 @@ def step_motor(steps, delay=0.002):
         GPIO.output(IN3, current_step[2])
         GPIO.output(IN4, current_step[3])
         time.sleep(delay)
+    # De-energize coils to reduce heating after movement
+    stop_motor()
 
-def move_forward(steps):
-    step_motor(steps)
+def move_forward(steps, delay=DEFAULT_DELAY):
+    step_motor(steps, delay)
 
-def move_backward(steps, delay=0.002):
+def move_backward(steps, delay=DEFAULT_DELAY):
     seq_len = len(full_step_sequence)
     for i in range(steps):
-        # Reverse the sequence for backward motion
         current_step = full_step_sequence[(-i) % seq_len]
         GPIO.output(IN1, current_step[0])
         GPIO.output(IN2, current_step[1])
         GPIO.output(IN3, current_step[2])
         GPIO.output(IN4, current_step[3])
         time.sleep(delay)
+    stop_motor()
 
 def stop_motor():
     # De-energize all coils

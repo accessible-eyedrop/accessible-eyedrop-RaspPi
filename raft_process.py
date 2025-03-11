@@ -87,15 +87,17 @@ def visualize_flow(flow, roi):
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 def calculate_drop_angle(white_pixels, reference_point):
+    # 此函数不再使用，因为已取消 reference_point
     if not white_pixels:
         return None
     x_coords, y_coords = zip(*white_pixels)
     centroid_x = int(np.mean(x_coords))
     centroid_y = int(np.mean(y_coords))
-    centroid_y -= 10  # shift upward by 10 pixels
     dx = centroid_x - reference_point[0]
     dy = centroid_y - reference_point[1]
     angle = math.degrees(math.atan2(dy, dx))
+    if dx == 0:
+        angle = 0
     return (centroid_x, centroid_y, angle)
 
 def process_video(video_path, output_path):
@@ -115,16 +117,18 @@ def process_video(video_path, output_path):
         os.makedirs(frame_folder, exist_ok=True)
       
     frame_count = extract_frames(video_path, frame_folder)
-    roi = (130, 200, 220, 185)
-    reference_point = (130, 290)
+    roi = (150, 250, 320, 160)
 
     output_frames = []
     drop_count = 0
     last_drop_angle = None
     cooldown_frames = 0
-    WHITE_AREA_THRESHOLD = 7000
+    WHITE_AREA_THRESHOLD = 6500
 
     model = load_raft()
+    
+    # 用于保存上一次检测到的 centroid
+    prev_centroid = None
 
     for i in range(frame_count - 1):
         frame1 = cv2.imread(os.path.join(frame_folder, f"frame_{i:04d}.png"))
@@ -134,7 +138,6 @@ def process_video(video_path, output_path):
             continue
 
         frame_diff = frame_difference(frame1, frame2, roi)
-        cv2.circle(frame_diff, reference_point, 5, (0, 255, 255), -1)
 
         roi_mask = frame_diff[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]]
         white_pixels = list(zip(np.where(roi_mask == 255)[1] + roi[0],
@@ -144,21 +147,44 @@ def process_video(video_path, output_path):
         centroid_x, centroid_y = None, None
 
         if white_area > WHITE_AREA_THRESHOLD and cooldown_frames == 0:
-            drop_count += 1
-            cooldown_frames = 50
-            result = calculate_drop_angle(white_pixels, reference_point)
-            if result:
-                centroid_x, centroid_y, drop_angle = result
-                last_drop_angle = drop_angle
-                print(f"✅ Successful drop #{drop_count} at frame {i+1}, angle: {drop_angle:.2f}°")
+            # 根据 white_pixels 计算当前 centroid
+            if white_pixels:
+                x_coords, y_coords = zip(*white_pixels)
+                current_centroid = (int(np.mean(x_coords)), int(np.mean(y_coords)))
+            else:
+                current_centroid = None
+
+            if current_centroid is not None:
+                if prev_centroid is None:
+                    # 第一次检测：存储 centroid，并设置冷却 2 帧
+                    prev_centroid = current_centroid
+                    cooldown_frames = 1
+                else:
+                    # 计算上一次 centroid 与当前 centroid 之间的角度
+                    dx = current_centroid[0] - prev_centroid[0]
+                    dy = current_centroid[1] - prev_centroid[1]
+                    drop_angle = math.degrees(math.atan2(dy, dx))
+                    old_centroid = prev_centroid  # 保存上一次的 centroid 用于绘制
+                    prev_centroid = current_centroid  # 更新为当前点
+                    drop_count += 1
+                    cooldown_frames = 15
+                    last_drop_angle = drop_angle
+                    print(f"✅ Successful drop #{drop_count} at frame {i+1}, angle: {drop_angle:.2f}°")
+                centroid_x, centroid_y = current_centroid
 
         if cooldown_frames > 0:
             cooldown_frames -= 1
 
         cv2.rectangle(frame_diff, (roi[0], roi[1]), (roi[0]+roi[2], roi[1]+roi[3]), (0, 255, 0), 2)
+        # 绘制检测到的点、连线及角度标注
         if drop_angle is not None:
+            # 绘制上一次检测到的点（黄色）
+            cv2.circle(frame_diff, old_centroid, 5, (0, 255, 255), -1)
+            # 绘制当前检测到的点（红色）
             cv2.circle(frame_diff, (centroid_x, centroid_y), 5, (0, 0, 255), -1)
-            cv2.line(frame_diff, reference_point, (centroid_x, centroid_y), (255, 0, 0), 2)
+            # 绘制两点之间的连线（蓝色）
+            cv2.line(frame_diff, old_centroid, (centroid_x, centroid_y), (255, 0, 0), 2)
+            # 在当前点旁标注角度数值
             cv2.putText(frame_diff, f"Angle: {drop_angle:.2f}", (centroid_x+10, centroid_y-10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         drop_text = f"Success Drops: {drop_count}"
@@ -174,7 +200,8 @@ def process_video(video_path, output_path):
     print(f"✅ Processing complete. Video saved to {output_path}")
     print(f"🔢 Total successful drops: {drop_count}")
 
-    return {"output_video": output_path, "drop_count": drop_count}
+    return {"output_video": output_path, "drop_count": drop_count, "angle": last_drop_angle}
+
 
 def record_video(duration=10, output_file="captured.mp4"):
     picam2 = Picamera2()
@@ -192,6 +219,27 @@ def record_video(duration=10, output_file="captured.mp4"):
         out.write(frame)
     picam2.stop()
     out.release()
-    picam2.close()   # <-- Added this line to release the camera fully
+    picam2.close()   # <-- 释放摄像头资源
     print("Video saved to:", output_file)
+    return output_file
+
+# 在 raft_process.py 中新增如下函数
+def record_video_until(stop_event, output_file="captured.mp4", resolution=(640,480), fps=20):
+    from picamera2 import Picamera2
+    import cv2
+    picam2 = Picamera2()
+    video_config = picam2.create_video_configuration(main={"format": "RGB888", "size": resolution})
+    picam2.configure(video_config)
+    picam2.start()
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_file, fourcc, fps, resolution)
+    print("Recording video until stop event is set...")
+    while not stop_event.is_set():
+        frame = picam2.capture_array()
+        if frame is not None:
+            out.write(frame)
+    picam2.stop()
+    out.release()
+    picam2.close()   # 释放摄像头资源
+    print("Video recording stopped, saved to:", output_file)
     return output_file
